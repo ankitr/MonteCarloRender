@@ -22,8 +22,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 
 import numpy as np
-from multiprocessing import Pool
-from itertools import repeat
 from numba import cuda
 from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 import sys
@@ -45,6 +43,7 @@ import threading
 # batchSize         = Max number of photons per device (affected by memory considerations)
 # nPhotonsRequested = The size of the array asked to be returned - how many photons should be detected
 # nPhotonsToRun     = The maximum photons to run before giving up
+# muA               = Absorption coefficient (units of 1/length)
 # muS               = Inverse scattering mean free path (units of 1/length)
 # g                 = Henyey Greenstein anisotropy coefficient
 # normalize_d       = A number to normalize the returned number of detected photons, if None doesn't do anything.
@@ -57,11 +56,13 @@ import threading
 #                          9 - total distance propogated when hit target (for the first time)
 #                          10 - number of times target was hit
 #                        Columns 8,9,10 are updated only with a scattering target.
-# control_param     = A dictionay with the following simulation control settings:
+# control_param     = A dictionary with the following simulation control settings:
 #    max_N          = Maximum number of scattering events before a photon is terminated.
-#    max_distance_from_det = Farthest distance from the detector a photon is allowed before it is terminated.
+#    max_distance_from_det = Farthest distance from the detector a photon is allowed before it is terminated}
 # z_bounded         = A boolean indicating if we media is bounded in z (if so it is defined by z_range).
 # z_range           = Used if z_bounded==True. A 2 element list indicating the min and max z of the media.
+# absorb_threshold  = Weight under which a photon can be removed
+# absorb_chance     = Chance that a photon is removed from the simulation in the roulette
 
 
 # source            = A dictionary defining the source (processed by the simSource() funciton).
@@ -92,7 +93,6 @@ import threading
 #  The rest of these parameters are only requires for a lens:
 #    det_size       = The size of the actual detector (behind the lens), assumed to a be square, with a side length defined by this parameter.
 #    focus_target   = The z coordinate being focused (probably the z coordinate of the target).
-
 # target            = A dictionary defining the target (assumed to be a square parallel to the z plane).
 #                     Has the following properties:
 #    type           = Target type, one of the following:
@@ -123,7 +123,7 @@ import threading
 def lunchPacketwithBatch(batchSize = 1000,
                         nPhotonsRequested = 1e6,
                         nPhotonsToRun = 1e10,
-                        muS = 1.0, g = 0.85,
+                        muA = 2.0, muS = 1.0, g = 0.85,
                         source = {'r': np.array([0.0, 0.0, 0.0]),
                                   'mu': np.array([0.0, 0.0, 1.0]),
                                   'method': 'pencil', 'time_profile': 'delta'},
@@ -138,8 +138,10 @@ def lunchPacketwithBatch(batchSize = 1000,
                                   'z_target':20},
                         z_bounded = False,
                         z_range = np.array([0.0,30.0]),
-                        device_id = 0
-                        ):
+                        device_id = 0,
+                        absorb_threshold = 0.0001,
+                        absorb_chance = 0.1):
+    muA = float(muA)
     muS = float(muS)
     g = float(g)
     detR = float(detector['radius'])
@@ -172,20 +174,22 @@ def lunchPacketwithBatch(batchSize = 1000,
 
     while photon_counters[0] < nPhotonsToRun and photon_counters[1] < nPhotonsRequested:
         if device_id == -1: # Run multi GPU version
-            ret = MultiGPUWrapper(batchSize, nPhotonsToRun, muS, g,
+            ret = MultiGPUWrapper(batchSize, nPhotonsToRun, muA, muS, g,
                              source_type, source_param1, source_param2,
                              detector_params,
                              max_N, max_distance_from_det,
                              target_type, target_mask, target_gridsize,
-                             z_target, z_bounded, z_range, ret_cols)
+                             z_target, z_bounded, z_range, ret_cols,
+                             absorb_threshold, absorb_chance)
         else: # Run on specific GPU (device_id)
             ret = SingleGPUWrapper(device_id, batchSize, nPhotonsToRun,
-                                   muS, g,
+                                   muA, muS, g,
                                    source_type, source_param1, source_param2,
                                    detector_params,
                                    max_N, max_distance_from_det,
                                    target_type, target_mask, target_gridsize,
-                                   z_target, z_bounded, z_range, ret_cols)
+                                   z_target, z_bounded, z_range, ret_cols,
+                                   absorb_threshold, absorb_chance)
         ret_data = ret[0]
         # Not valid photons return with n=-1 - so remove them
         ret_data = ret_data[ret_data[:, 0]>0, :]
@@ -202,13 +206,7 @@ def lunchPacketwithBatch(batchSize = 1000,
     return data, photon_counters
 
 # A wrapper function used when a specific GPU is chosen with device_id
-def SingleGPUWrapper(device_id, photons_requested, max_photons_to_run,
-                     muS, g,
-                     source_type, source_param1, source_param2,
-                     detector_params,
-                     max_N, max_distance_from_det,
-                     target_type, target_mask, target_gridsize,
-                     z_target, z_bounded, z_range, ret_cols):
+def SingleGPUWrapper(device_id, photons_requested, max_photons_to_run, *args, **kwargs):
     data_out = {}
     data_out[device_id] = [0,0]
 
@@ -217,23 +215,12 @@ def SingleGPUWrapper(device_id, photons_requested, max_photons_to_run,
 
     GPUWrapper(data_out, device_id,
                photons_req_per_device, max_photons_per_device,
-               muS, g,
-               source_type, source_param1, source_param2,
-               detector_params,
-               max_N, max_distance_from_det,
-               target_type, target_mask, target_gridsize,
-               z_target, z_bounded, z_range, ret_cols)
+               *args, **kwargs)
     return data_out[device_id]
 
 # A wrapper function when multiple GPUs are used (with device_id=-1)
 # Multiple GPUs are running with the Python multithreading environment.
-def MultiGPUWrapper(photons_requested, max_photons_to_run,
-                    muS, g,
-                    source_type, source_param1, source_param2,
-                    detector_params,
-                    max_N, max_distance_from_det,
-                    target_type, target_mask, target_gridsize,
-                    z_target, z_bounded, z_range, ret_cols):
+def MultiGPUWrapper(photons_requested, max_photons_to_run, *args, **kwargs):
     data_out = {}
     children = []
     n_GPUs = len(cuda.list_devices())
@@ -249,13 +236,8 @@ def MultiGPUWrapper(photons_requested, max_photons_to_run,
     for device_id, dev in enumerate(cuda.list_devices()):
         data_out[device_id] = [0,0]
         t = threading.Thread(target=GPUWrapper, args=(data_out, device_id,
-                                                      photons_req_per_device, max_photons_per_device,
-                                                      muS, g,
-                                                      source_type, source_param1, source_param2,
-                                                      detector_params,
-                                                      max_N, max_distance_from_det,
-                                                      target_type, target_mask, target_gridsize,
-                                                      z_target, z_bounded, z_range, ret_cols))
+                                                      photons_req_per_device, max_photons_per_device, *args),
+                                                kwargs=kwargs)
         t.start()
         children.append(t)
 
@@ -277,12 +259,13 @@ def MultiGPUWrapper(photons_requested, max_photons_to_run,
 # This function actually runs the CUDA kernel on the GPU
 def GPUWrapper(data_out, device_id,
                photons_req_per_device, max_photons_per_device,
-               muS, g,
+               muA, muS, g,
                source_type, source_param1, source_param2,
                detector_params,
                max_N, max_distance_from_det,
                target_type, target_mask, target_gridsize,
-               z_target, z_bounded, z_range, ret_cols):
+               z_target, z_bounded, z_range, ret_cols,
+               absorb_threshold, absorb_chance):
 
     # TODO: These numbers can be optimized based on the device / architecture / number of photons
     threads_per_block = 256
@@ -291,7 +274,6 @@ def GPUWrapper(data_out, device_id,
     max_photons_per_thread = int(np.ceil(float(max_photons_per_device)/(threads_per_block * blocks)))
 
     cuda.select_device(device_id)
-    device = cuda.get_current_device()
     stream = cuda.stream()  # use stream to trigger async memory transfer
 
     # Keeping this piece of code here for now -potentially we need this in the future
@@ -315,12 +297,13 @@ def GPUWrapper(data_out, device_id,
 
     # Actual kernel call
     propPhotonGPU[blocks, threads_per_block](rng_states, data_out_device, photon_counters_device,
-                                             photons_per_thread, max_photons_per_thread, muS, g,
+                                             photons_per_thread, max_photons_per_thread, muA, muS, g,
                                              source_type, source_param1, source_param2,
                                              detector_params,
                                              max_N, max_distance_from_det,
                                              target_type, target_mask, target_gridsize,
-                                             z_target, z_bounded, z_range)
+                                             z_target, z_bounded, z_range,
+                                             absorb_threshold, absorb_chance)
     # Copy data back
     data_out_device.copy_to_host(data, stream=stream)
     photon_counters_device.copy_to_host(photon_counters, stream=stream)
@@ -390,12 +373,12 @@ def GPUWrapper(data_out, device_id,
 
 @cuda.jit
 def propPhotonGPU(rng_states, data_out, photon_counters,
-                  photons_requested, max_photons_to_run, muS, g,
+                  photons_requested, max_photons_to_run, muA, muS, g,
                   source_type, source_param1, source_param2,
                   detector_params,
                   max_N, max_distance_from_det,
                   target_type, target_mask, target_gridsize, z_target,
-                  z_bounded, z_range):
+                  z_bounded, z_range, absorb_threshold, absorb_chance):
     # Setup
     thread_id = cuda.grid(1)
     target_x_dim = target_mask.shape[1]
@@ -475,6 +458,7 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
                 nuy = source_param1[4]*mu +(source_param1[4]*source_param1[5]*cos_psi + source_param1[3]*sin_psi)*sqrt_mu/sqrt_w
                 nuz = source_param1[5]*mu - cos_psi*sqrt_mu*sqrt_w
         d, n = source_param1[8],source_param1[9]
+        weight = 1.0
 
 
         # Start Monte Carlo inifinite loop for traced photon
@@ -495,6 +479,7 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
             rand1 = xoroshiro128p_uniform_float32(rng_states, thread_id)
             rand2 = xoroshiro128p_uniform_float32(rng_states, thread_id)
             rand3 = xoroshiro128p_uniform_float32(rng_states, thread_id)
+            rand4 = xoroshiro128p_uniform_float32(rng_states, thread_id)
 
             # Calculate random propogation distance
             cd = - math.log(rand1) / muS
@@ -618,12 +603,21 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
             x, y, z = t_rx, t_ry, t_rz
             d += cd #prop distance
             n += 1 #increase scatter counter
+            weight *= muA / (muA + muS)
+
+            # Roulette to remove low-weight photons
+            if weight < absorb_threshold:
+                if (rand4 <= absorb_chance):
+                    weight /= absorb_chance
+                else:
+                    photons_cnt_stopped += 1
+                    break
 
             # Scatter to new angle
             psi = 2 * math.pi * rand2
             mu = 1/(2*g) * (1+g**2 - ( (1-g*g)/(1-g+2*g*rand3))**2)
 
-            # Update angels
+            # Update angles
             sin_psi = math.sin(psi)
             cos_psi = math.cos(psi)
             sqrt_mu = math.sqrt(1-mu**2)
