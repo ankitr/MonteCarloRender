@@ -8,7 +8,7 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
   
 ## Several notes on properties / limitations:
 ### Media:
- Assume homogeneous media. You can provide the scattering mean free path (MFP) and Henyey Greenstein anisotropy coefficient.
+ Assume homogeneous media. You can provide the scattering mean free path (MFP), absorption coefficient, Henyey Greenstein anisotropy coefficient.
 
 ### Detector:
  Assume a single detector. <br/>
@@ -25,10 +25,11 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
 
 ## Example:
     import MC
+    import numpy as np
     ret = MC.lunchPacketwithBatch(batchSize = 1e7,
                                nPhotonsRequested = 1e7,
                                 nPhotonsToRun = 1e7,
-                                muS = 1.0, g = 0.85,
+                                muA = 0.05, muS = 1.0, g = 0.85,
                                 source = {'r': np.array([0.0, 0.0, 30.0]),
                                           'mu': np.array([0.0, 0.0, -1.0]),
                                           'method': 'pencil', 'time_profile': 'delta'},
@@ -36,11 +37,13 @@ This is a GPU implementation of a Monte Carlo Photon Transport in scattering med
                                 control_param = {'max_N': 1e5,
                                                  'max_distance_from_det': 110},
                                 normalize_d = None,
-                                ret_cols = [0,1,2,3,4,5,6,7]
+                                ret_cols = [0,1,2,3,4,5,6,7],
+                                absorb_threshold = 0.0001,
+                                absorb_chance = 0.1
                                 )      
                                 
-  The runtime is approximatley 15 sec on a single Nvidia GTX 1080. <br/>
-  ret[0] is the data. <br/>
-  ret[1][0] are the number of simulated photons.<br/>
-  ret[1][1] are the number of detected photons.<br/>
+  The runtime is approximateley 5 sec on a single Nvidia GTX 1080. <br/>
+  `ret[0]` is the data. <br/>
+  `ret[1][0]` are the number of simulated photons.<br/>
+  `ret[1][1]` are the number of detected photons.<br/>
   etc.
