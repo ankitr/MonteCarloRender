@@ -123,7 +123,7 @@ import threading
 def lunchPacketwithBatch(batchSize = 1000,
                         nPhotonsRequested = 1e6,
                         nPhotonsToRun = 1e10,
-                        muA = 0.05, muS = 1.0, g = 0.85,
+                        muA = 1.0, muS = 80.0, g = 0.85,
                         source = {'r': np.array([0.0, 0.0, 0.0]),
                                   'mu': np.array([0.0, 0.0, 1.0]),
                                   'method': 'pencil', 'time_profile': 'delta'},
