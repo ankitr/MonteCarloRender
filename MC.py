@@ -435,6 +435,7 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
             y_offset = (math.floor(pattern_index / source_param1[0]) - SL_y_center_index + 0.5) * source_param1[7]
             x += x_offset
             y += y_offset
+        possible_distance_from_det = math.sqrt(x*x + y*y + z*z)
         #get nux, nuy, nuz
         if source_type == 0 or source_type == 2 or source_type == 4: # Fixed angle (pencil, area)
             nux, nuy, nuz = source_param1[3], source_param1[4], source_param1[5]
@@ -467,9 +468,11 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
             if n >= max_N:
                 photons_cnt_stopped += 1
                 break
-            if math.sqrt(x*x + y*y + z*z) > max_distance_from_det:  # Assumes detector at origin
-                photons_cnt_stopped += 1
-                break
+            if possible_distance_from_det > max_distance_from_det: # Assumes detector at origin
+                possible_distance_from_det = math.sqrt(x*x + y*y + z*z)
+                if possible_distance_from_det > max_distance_from_det:
+                    photons_cnt_stopped += 1
+                    break
             if z_bounded:# Check if we are out of tissue (when starting from tissue z boundary)
                 if z > z_max or z < z_min:
                     photons_cnt_stopped += 1
@@ -483,6 +486,9 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
 
             # Calculate random propogation distance
             cd = - math.log(rand1) / muS
+            
+            # Increment the max possible distance from the detector for efficiency               
+            max_distance_from_det += cd
 
             # Update temporary new location
             t_rx = x + cd * nux
