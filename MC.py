@@ -55,6 +55,7 @@ import threading
 #                          8 - number of scattering events when hit target_type
 #                          9 - total distance propogated when hit target (for the first time)
 #                          10 - number of times target was hit
+#                          11 - weight of photons
 #                        Columns 8,9,10 are updated only with a scattering target.
 # control_param     = A dictionary with the following simulation control settings:
 #    max_N          = Maximum number of scattering events before a photon is terminated.
@@ -287,7 +288,7 @@ def GPUWrapper(data_out, device_id,
    #     MC_cuda_kernel = cuda.jit(propPhotonGPU)
 
 
-    data = np.ndarray(shape=(threads_per_block*blocks, photons_per_thread, 11), dtype=np.float32)
+    data = np.ndarray(shape=(threads_per_block*blocks, photons_per_thread, 12), dtype=np.float32)
     photon_counters = np.ndarray(shape=(threads_per_block*blocks, 5), dtype=np.int)
     data_out_device = cuda.device_array_like(data, stream=stream)
     photon_counters_device = cuda.device_array_like(photon_counters, stream=stream)
@@ -360,8 +361,8 @@ def GPUWrapper(data_out, device_id,
 #
 #
 #  Return columns:
-#    0, 1, 2, 3, 4,   5,    6,    7,       8,            9,           10
-#    n, d, x ,y, z, mu_x, mu_y, mu_z, n_hit_target, d_hit_target,  n_target_hit_times
+#    0, 1, 2, 3, 4,   5,    6,    7,       8,            9,           10                11
+#    n, d, x ,y, z, mu_x, mu_y, mu_z, n_hit_target, d_hit_target,  n_target_hit_times, weight
 #   cols 8,9 are updated only with scattering target
 #
 #   photon_counters:
@@ -486,8 +487,8 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
 
             # Calculate random propogation distance
             cd = - math.log(rand1) / muS
-            
-            # Increment the max possible distance from the detector for efficiency               
+
+            # Increment the max possible distance from the detector for efficiency
             max_distance_from_det += cd
 
             # Update temporary new location
@@ -531,7 +532,7 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
                             photons_cnt_stopped += 1
                             break
 
-                    # Recprd data and break
+                    # Record data and break
                     data_out[thread_id, photons_cnt_detected, 0] = n
                     data_out[thread_id, photons_cnt_detected, 1] = d
                     data_out[thread_id, photons_cnt_detected, 2] = x
@@ -540,6 +541,7 @@ def propPhotonGPU(rng_states, data_out, photon_counters,
                     data_out[thread_id, photons_cnt_detected, 5] = nux
                     data_out[thread_id, photons_cnt_detected, 6] = nuy
                     data_out[thread_id, photons_cnt_detected, 7] = nuz
+                    data_out[thread_id, photons_cnt_detected, 11] = weight
                     photons_cnt_detected += 1
                     if hit_target_flag:
                         photons_cnt_detected_hit_target += 1
